@@ -46,6 +46,23 @@ def add_admin(db: Session, group_id: str, user_id: str):
         group.admin_ids = admins
         db.commit()
 
+def get_admin_ids(db: Session, group_id: str) -> list:
+    group = db.query(Group).filter(Group.group_id == group_id).first()
+    if not group:
+        return []
+    return group.admin_ids or []
+
+
+def remove_admin(db: Session, group_id: str, target_user_id: str) -> bool:
+    """移除指定使用者的管理員身分。回傳 False 代表對方本來就不是管理員。"""
+    group = get_or_create_group(db, group_id)
+    admins = list(group.admin_ids or [])
+    if target_user_id not in admins:
+        return False
+    admins.remove(target_user_id)
+    group.admin_ids = admins
+    db.commit()
+    return True
 
 # ── 菜單 ──────────────────────────────────────────────
 
