@@ -185,14 +185,58 @@ def handle_text(event: MessageEvent):
                 return
             reply(reply_token, order_service.search(db, group_id, match.group(1).strip()))
 
-        # /setadmin
+        # /setadmin（最多可設定 3 位管理員）
         elif text == "/setadmin":
             group = order_service.get_or_create_group(db, group_id)
-            if group.admin_ids:
-                reply(reply_token, "管理員已設定，無法重複設定")
+            admins = group.admin_ids or []
+            MAX_ADMINS = 3
+            if user_id in admins:
+                reply(reply_token, f"{user_name} 已經是管理員了")
+            elif len(admins) >= MAX_ADMINS:
+                reply(reply_token, f"⚠️ 管理員已達上限（{MAX_ADMINS} 位），無法再新增")
             else:
                 order_service.add_admin(db, group_id, user_id)
-                reply(reply_token, f"✅ {user_name} 已設為管理員")
+                remaining = MAX_ADMINS - len(admins) - 1
+                reply(reply_token, f"✅ {user_name} 已設為管理員（還可再設定 {remaining} 位）")
+
+        # /adminlist
+        elif text == "/adminlist":
+            if not order_service.is_admin(db, group_id, user_id):
+                reply(reply_token, "⚠️ 只有管理員可以查看管理員名單")
+                return
+            admin_ids = order_service.get_admin_ids(db, group_id)
+            if not admin_ids:
+                reply(reply_token, "目前尚無管理員")
+                return
+            lines = ["👑 目前管理員名單：\n"]
+            with ApiClient(configuration) as api_client:
+                messaging_api = MessagingApi(api_client)
+                for idx, admin_id in enumerate(admin_ids, start=1):
+                    try:
+                        profile = messaging_api.get_group_member_profile(group_id, admin_id)
+                        name = profile.display_name
+                    except Exception:
+                        name = "（已離開群組或無法取得名稱）"
+                    lines.append(f"  {idx}. {name}")
+            reply(reply_token, "\n".join(lines))
+
+        # /removeadmin <編號>（需 /confirm 二次確認，編號見 /adminlist）
+        elif text.startswith("/removeadmin"):
+            if not order_service.is_admin(db, group_id, user_id):
+                reply(reply_token, "⚠️ 只有管理員可以移除管理員")
+                return
+            match = re.match(r"/removeadmin\s+(\d+)$", text)
+            if not match:
+                reply(reply_token, "格式錯誤，請使用：/removeadmin <編號>\n例：/removeadmin 2\n請先用 /adminlist 確認編號")
+                return
+            index = int(match.group(1))
+            admin_ids = order_service.get_admin_ids(db, group_id)
+            if index < 1 or index > len(admin_ids):
+                reply(reply_token, f"編號 {index} 不存在，請用 /adminlist 確認編號")
+                return
+            target_id = admin_ids[index - 1]
+            pending_confirm[group_id] = {"action": "removeadmin", "target_id": target_id, "user_id": user_id}
+            reply(reply_token, f"⚠️ 確定要移除編號 {index} 這位管理員的身分嗎？\n請輸入 /confirm 確認")
 
         # /openmenu 或 /openmenu <歷史編號>（套用該次歷史紀錄的品項）
         elif text.startswith("/openmenu"):
@@ -256,10 +300,10 @@ def handle_text(event: MessageEvent):
         elif text == "/confirm":
             pending = pending_confirm.get(group_id)
             if not pending:
-                reply(reply_token, "目前沒有待確認的刪除操作")
+                reply(reply_token, "目前沒有待確認的操作")
                 return
             if pending["user_id"] != user_id:
-                reply(reply_token, "⚠️ 請由發起刪除指令的管理員本人輸入 /confirm")
+                reply(reply_token, "⚠️ 請由發起指令的管理員本人輸入 /confirm")
                 return
             del pending_confirm[group_id]
             if pending["action"] == "deletemenu":
@@ -268,6 +312,9 @@ def handle_text(event: MessageEvent):
                 reply(reply_token, order_service.delete_history(db, group_id, pending["index"]))
             elif pending["action"] == "clearorder":
                 reply(reply_token, order_service.clear_order_items(db, group_id))
+            elif pending["action"] == "removeadmin":
+                ok = order_service.remove_admin(db, group_id, pending["target_id"])
+                reply(reply_token, "✅ 已移除該管理員身分" if ok else "⚠️ 該使用者已不是管理員，無需移除")
 
         # /done
         elif text == "/done":
@@ -291,7 +338,9 @@ def handle_text(event: MessageEvent):
                 "  /menulist — 列出所有已儲存的菜單\n"
                 "  /search <關鍵字> — 搜尋菜單與歷史紀錄\n\n"
                 "管理員指令：\n"
-                "  /setadmin — 設定自己為管理員（首次使用）\n"
+                "  /setadmin — 設定自己為管理員（最多可設定 3 位）\n"
+                "  /adminlist — 查看目前管理員名單\n"
+                "  /removeadmin <編號> — 移除指定管理員身分（需 /confirm 確認）\n"
                 "  上傳 .txt 檔案 — 匯入菜單（保留舊菜單）\n"
                 "  /switchmenu <編號> — 切換使用中的菜單（開單中無法切換）\n"
                 "  /deletemenu <編號> — 刪除指定菜單（需 /confirm 確認）\n"

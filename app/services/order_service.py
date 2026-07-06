@@ -2,8 +2,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.models.models import Group, Menu, MenuItem, Order, OrderItem
 from typing import Optional
-from datetime import timezone
+from datetime import timezone, datetime
+from zoneinfo import ZoneInfo
 from collections import defaultdict, Counter
+
+TAIPEI_TZ = ZoneInfo("Asia/Taipei")
+
+
+def to_taipei(dt: Optional[datetime]) -> Optional[datetime]:
+    """把資料庫存的 UTC 時間轉成台北時間（+8）顯示用。
+    若讀出來的 datetime 沒有 tzinfo（例如某些環境下 SQLite 的行為），視為 UTC 處理。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TAIPEI_TZ)
 
 
 # ── 群組 ──────────────────────────────────────────────
@@ -176,7 +189,7 @@ def search(db: Session, group_id: str, keyword: str) -> str:
 
     matched_orders = []
     for order in past_orders:
-        date_str = order.closed_at.strftime("%m/%d %H:%M") if order.closed_at else "未知"
+        date_str = to_taipei(order.closed_at).strftime("%m/%d %H:%M") if order.closed_at else "未知"
         store = db.query(Menu).filter(Menu.menu_id == order.menu_id).first()
         store_name = store.store_name if store else "未知店家"
         store_match = keyword in store_name
@@ -514,7 +527,7 @@ def clear_order_items(db: Session, group_id: str) -> str:
 def _format_order_summary(order: Order, store: Optional[Menu] = None) -> str:
     """格式化一次結單的摘要，供 close_order 和 history 詳細查詢共用"""
     store_name = store.store_name if store else "未知店家"
-    date_str = order.closed_at.strftime("%m/%d %H:%M") if order.closed_at else "未知"
+    date_str = to_taipei(order.closed_at).strftime("%m/%d %H:%M") if order.closed_at else "未知"
 
     items = order.order_items
     if not items:
@@ -577,7 +590,7 @@ def get_group_history(db: Session, group_id: str, limit: int = 10) -> str:
 
     lines = [f"📚 最近 {limit} 次點餐紀錄：\n"]
     for idx, order in enumerate(orders, start=1):
-        date_str = order.closed_at.strftime("%m/%d %H:%M") if order.closed_at else "未知"
+        date_str = to_taipei(order.closed_at).strftime("%m/%d %H:%M") if order.closed_at else "未知"
         store = db.query(Menu).filter(Menu.menu_id == order.menu_id).first()
         store_name = store.store_name if store else "未知店家"
         total = sum(oi.item.price * oi.quantity for oi in order.order_items)
@@ -608,25 +621,36 @@ def get_group_history_detail(db: Session, group_id: str, index: int, limit: int 
 
 
 def get_user_history(db: Session, group_id: str, user_id: str, user_name: str, limit: int = 10) -> str:
-    items = (
-        db.query(OrderItem)
-        .join(Order)
+    """依「訂單」分組顯示使用者的點餐歷史，同一次結單的品項會列在一起，
+    而不是像品項清單一樣把每個品項拆開各佔一行。"""
+    orders = (
+        db.query(Order)
+        .join(OrderItem, OrderItem.order_id == Order.order_id)
         .filter(Order.group_id == group_id, OrderItem.user_id == user_id, Order.is_open == False)
         .order_by(desc(Order.closed_at))
+        .distinct()
         .limit(limit)
         .all()
     )
-    if not items:
+    if not orders:
         return f"{user_name} 尚無點餐紀錄"
 
-    lines = [f"📖 {user_name} 的最近 {limit} 筆紀錄：\n"]
-    for oi in items:
-        date_str = oi.order.closed_at.strftime("%m/%d %H:%M") if oi.order.closed_at else "未知"
-        store = db.query(Menu).filter(Menu.menu_id == oi.order.menu_id).first()
+    lines = [f"📖 {user_name} 的最近 {len(orders)} 筆點餐紀錄：\n"]
+    for order in orders:
+        date_str = to_taipei(order.closed_at).strftime("%m/%d %H:%M") if order.closed_at else "未知"
+        store = db.query(Menu).filter(Menu.menu_id == order.menu_id).first()
         store_name = store.store_name if store else "未知店家"
-        qty_str = f" x{oi.quantity}" if oi.quantity > 1 else ""
-        note_str = f"（{oi.note}）" if oi.note else ""
-        lines.append(f"  {date_str}｜{store_name}｜{oi.item.name}{qty_str} ${oi.item.price * oi.quantity}{note_str}")
+        user_items = [oi for oi in order.order_items if oi.user_id == user_id]
+
+        lines.append(f"  {date_str}｜{store_name}")
+        subtotal_total = 0
+        for oi in user_items:
+            qty_str = f" x{oi.quantity}" if oi.quantity > 1 else ""
+            note_str = f"（{oi.note}）" if oi.note else ""
+            subtotal = oi.item.price * oi.quantity
+            subtotal_total += subtotal
+            lines.append(f"    {oi.item.name}{qty_str} ${subtotal}{note_str}")
+        lines.append(f"    小計：${subtotal_total}\n")
 
     return "\n".join(lines)
 
@@ -694,7 +718,7 @@ def delete_history(db: Session, group_id: str, index: int, limit: int = 10) -> s
     target = orders[index - 1]
     store = db.query(Menu).filter(Menu.menu_id == target.menu_id).first()
     store_name = store.store_name if store else "未知店家"
-    date_str = target.closed_at.strftime("%m/%d %H:%M") if target.closed_at else "未知"
+    date_str = to_taipei(target.closed_at).strftime("%m/%d %H:%M") if target.closed_at else "未知"
 
     db.delete(target)  # OrderItem 設有 cascade="all, delete-orphan"，會一併刪除
     db.commit()
