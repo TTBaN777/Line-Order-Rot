@@ -46,6 +46,7 @@ def add_admin(db: Session, group_id: str, user_id: str):
         group.admin_ids = admins
         db.commit()
 
+
 def get_admin_ids(db: Session, group_id: str) -> list:
     group = db.query(Group).filter(Group.group_id == group_id).first()
     if not group:
@@ -64,16 +65,20 @@ def remove_admin(db: Session, group_id: str, target_user_id: str) -> bool:
     db.commit()
     return True
 
+
 # ── 菜單 ──────────────────────────────────────────────
 
-def create_menu(db: Session, group_id: str, store_name: str, items: list[dict]) -> Menu:
+CATEGORY_ORDER = ["飲料", "餐點", "其他"]  # 固定分類順序，店家分類與品項分類共用
+
+
+def create_menu(db: Session, group_id: str, store_name: str, items: list[dict], category: str = "其他") -> Menu:
     """上傳新菜單，保留舊菜單（不覆蓋），新的設為 is_active"""
     get_or_create_group(db, group_id)
 
     # 停用目前的 active 菜單
     db.query(Menu).filter(Menu.group_id == group_id, Menu.is_active == True).update({"is_active": False})
 
-    menu = Menu(group_id=group_id, store_name=store_name)
+    menu = Menu(group_id=group_id, store_name=store_name, category=category or "其他")
     db.add(menu)
     db.flush()
 
@@ -102,32 +107,40 @@ def get_active_menu(db: Session, group_id: str) -> Optional[Menu]:
 
 
 def get_all_menus(db: Session, group_id: str) -> list[Menu]:
-    return (
+    """取得所有菜單，依「飲料 → 餐點 → 其他」分類排序，
+    同分類內維持原本建立時間新到舊的順序。"""
+    menus = (
         db.query(Menu)
         .filter(Menu.group_id == group_id)
         .order_by(desc(Menu.created_at))
         .all()
     )
 
+    def sort_key(menu):
+        cat = menu.category or "其他"
+        rank = CATEGORY_ORDER.index(cat) if cat in CATEGORY_ORDER else len(CATEGORY_ORDER)
+        return rank
+
+    return sorted(menus, key=sort_key)  # sorted() 是穩定排序，同分類內順序不會被打亂
+
 
 def format_menu_text(menu: Menu) -> str:
-    """格式化菜單，支援分類顯示"""
+    """格式化菜單，固定依「飲料 → 餐點 → 其他」的順序顯示分類。
+    若品項有其他自訂分類名稱（不在這三類裡），會排在這三類之後。"""
     lines = [f"📋 {menu.store_name} 菜單\n"]
     items = sorted(menu.items, key=lambda x: x.number)
 
-    # 檢查是否有分類
-    has_category = any(item.category for item in items)
+    grouped = defaultdict(list)
+    for item in items:
+        cat = item.category or "其他"
+        grouped[cat].append(item)
 
-    if has_category:
-        current_cat = None
-        for item in items:
-            if item.category != current_cat:
-                current_cat = item.category
-                if current_cat:
-                    lines.append(f"\n【{current_cat}】")
-            lines.append(f"  {item.number}. {item.name}  ${item.price}")
-    else:
-        for item in items:
+    ordered_categories = [c for c in CATEGORY_ORDER if c in grouped]
+    ordered_categories += [c for c in grouped if c not in CATEGORY_ORDER]
+
+    for cat in ordered_categories:
+        lines.append(f"\n【{cat}】")
+        for item in grouped[cat]:
             lines.append(f"  {item.number}. {item.name}  ${item.price}")
 
     lines.append("\n輸入 /order <編號> 來點餐")
@@ -135,19 +148,52 @@ def format_menu_text(menu: Menu) -> str:
 
 
 def get_menu_list(db: Session, group_id: str) -> str:
-    """列出所有已儲存的菜單"""
+    """列出所有已儲存的菜單，依「飲料 → 餐點 → 其他」分組顯示。
+    編號是全域連續編號（對應 get_all_menus 的順序），/switchmenu、/deletemenu 都用這個編號。"""
     menus = get_all_menus(db, group_id)
     if not menus:
         return "尚未建立任何菜單"
 
     active = get_active_menu(db, group_id)
-    lines = ["📚 已儲存的菜單：\n"]
-    for idx, menu in enumerate(menus, start=1):
-        active_str = "（目前使用中）" if active and menu.menu_id == active.menu_id else ""
-        lines.append(f"  {idx}. {menu.store_name} {active_str}")
 
-    lines.append("\n輸入 /switchmenu <編號> 切換菜單")
+    grouped = defaultdict(list)
+    for idx, menu in enumerate(menus, start=1):
+        cat = menu.category or "其他"
+        grouped[cat].append((idx, menu))
+
+    ordered_categories = list(CATEGORY_ORDER) + [c for c in grouped if c not in CATEGORY_ORDER]
+
+    lines = ["📚 已儲存的菜單：\n"]
+    for cat in ordered_categories:
+        lines.append(f"【{cat}】")
+        for idx, menu in grouped.get(cat, []):
+            active_str = "（目前使用中）" if active and menu.menu_id == active.menu_id else ""
+            lines.append(f"  {idx}. {menu.store_name} {active_str}")
+        lines.append("")  # 分類之間空一行
+
+    lines.append("輸入 /switchmenu <編號> 切換菜單")
     return "\n".join(lines)
+
+
+def set_menu_category(db: Session, group_id: str, index: int, category: str) -> str:
+    """調整指定編號菜單的店家分類（飲料／餐點／其他），不需要重新上傳 .txt。"""
+    menus = get_all_menus(db, group_id)
+    if not menus:
+        return "尚未建立任何菜單"
+
+    if index < 1 or index > len(menus):
+        return f"編號 {index} 不存在，請用 /menulist 確認編號"
+
+    target = menus[index - 1]
+    old_category = target.category or "其他"
+    target.category = category
+    db.commit()
+
+    note = ""
+    if category not in CATEGORY_ORDER:
+        note = f"（提醒：「{category}」不在固定的 飲料／餐點／其他 三類中，會排在這三類之後顯示）"
+
+    return f"✅「{target.store_name}」分類已從「{old_category}」改為「{category}」{note}"
 
 
 def switch_menu(db: Session, group_id: str, index: int) -> str:

@@ -39,6 +39,7 @@ class Menu(Base):
     menu_id = Column(Integer, primary_key=True, autoincrement=True)
     group_id = Column(String, ForeignKey("groups.group_id"), nullable=False)
     store_name = Column(String, nullable=False)
+    category = Column(String, default="其他")  # 店家分類：飲料／餐點／其他
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), default=now_utc)
 

@@ -175,6 +175,19 @@ def handle_text(event: MessageEvent):
                 return
             reply(reply_token, order_service.switch_menu(db, group_id, int(match.group(1))))
 
+        # /setcategory <編號> <飲料|餐點|其他>
+        elif text.startswith("/setcategory"):
+            if not order_service.is_admin(db, group_id, user_id):
+                reply(reply_token, "⚠️ 只有管理員可以調整菜單分類")
+                return
+            match = re.match(r"/setcategory\s+(\d+)\s+(.+)$", text)
+            if not match:
+                reply(reply_token, "格式錯誤，請使用：/setcategory <編號> <分類>\n例：/setcategory 1 飲料\n請先用 /menulist 確認編號")
+                return
+            index = int(match.group(1))
+            category = match.group(2).strip()
+            reply(reply_token, order_service.set_menu_category(db, group_id, index, category))
+
         # ── 管理員指令 ──────────────────────────────
 
         # /search <關鍵字>
@@ -343,6 +356,7 @@ def handle_text(event: MessageEvent):
                 "  /removeadmin <編號> — 移除指定管理員身分（需 /confirm 確認）\n"
                 "  上傳 .txt 檔案 — 匯入菜單（保留舊菜單）\n"
                 "  /switchmenu <編號> — 切換使用中的菜單（開單中無法切換）\n"
+                "  /setcategory <編號> <分類> — 調整菜單分類（飲料／餐點／其他）\n"
                 "  /deletemenu <編號> — 刪除指定菜單（需 /confirm 確認）\n"
                 "  /deletehistory <編號> — 刪除歷史紀錄（需 /confirm 確認）\n"
                 "  /admincancel <序號> — 取消他人點的品項（序號見 /status）\n"
@@ -351,6 +365,11 @@ def handle_text(event: MessageEvent):
                 "  /openmenu <歷史編號> — 開單並套用該次歷史紀錄的品項（編號見 /history）\n"
                 "  /done — 結單"
             ))
+
+    except Exception:
+        import traceback
+        traceback.print_exc()  # 印到 Railway log，方便查真正的錯誤原因
+        reply(reply_token, "⚠️ 系統發生錯誤，請稍後再試或聯絡管理員")
 
     finally:
         db.close()
@@ -396,9 +415,16 @@ def handle_file(event: MessageEvent):
             ))
             return
 
-        menu = order_service.create_menu(db, group_id, result["store_name"], result["items"])
+        menu = order_service.create_menu(
+            db, group_id, result["store_name"], result["items"], category=result.get("category", "其他")
+        )
         # 用 push 回傳，因為 reply_token 可能已被消耗
         push(group_id, f"✅ 菜單已匯入！\n\n{order_service.format_menu_text(menu)}")
+
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        push(group_id, "⚠️ 匯入菜單時發生錯誤，請確認檔案格式或稍後再試")
 
     finally:
         db.close()
